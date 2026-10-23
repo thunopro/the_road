@@ -4,6 +4,8 @@ import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
+const ALLOWED_EXT_REGEX = /\.(txt|md)$/i;
+
 export async function POST(request) {
   try {
     const SOURCE_DIR = path.resolve(process.cwd(), '../../writing/the_world');
@@ -25,32 +27,41 @@ export async function POST(request) {
     const articles = [];
 
     for (const file of files) {
-      if (file.endsWith('.txt') || file.endsWith('.md')) {
-        const filePath = path.join(SOURCE_DIR, file);
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
-          const rawContent = fs.readFileSync(filePath, 'utf8');
-          const destPath = path.join(DEST_DIR, file);
-          fs.writeFileSync(destPath, rawContent, 'utf8');
+      if (file.startsWith('.') || !ALLOWED_EXT_REGEX.test(file)) continue;
 
-          const cleanName = file.replace(/\.(txt|md)$/, '').replace(/_/g, ' ');
-          const wordCount = rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0;
+      const filePath = path.join(SOURCE_DIR, file);
+      try {
+        const lstat = fs.lstatSync(filePath);
+        // Skip symlinks pointing outside and non-regular files
+        if (!lstat.isFile() || lstat.isSymbolicLink()) continue;
 
-          articles.push({
-            id: file,
-            name: file,
-            title: cleanName,
-            size: stat.size,
-            wordCount,
-            lastModified: stat.mtime.toISOString(),
-            isTxt: file.endsWith('.txt')
-          });
-        }
+        const rawContent = fs.readFileSync(filePath, 'utf8');
+        const destPath = path.join(DEST_DIR, file);
+        fs.writeFileSync(destPath, rawContent, 'utf8');
+
+        const cleanName = file.replace(ALLOWED_EXT_REGEX, '').replace(/_/g, ' ').trim() || file;
+        const wordCount = rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0;
+
+        articles.push({
+          id: file,
+          name: file,
+          title: cleanName,
+          size: lstat.size,
+          wordCount,
+          lastModified: lstat.mtime.toISOString(),
+          isTxt: file.endsWith('.txt')
+        });
+      } catch (err) {
+        console.warn(`[SYNC] Skipped unreadable file ${file}:`, err.message);
       }
     }
 
     articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
-    fs.writeFileSync(DATA_FILE, JSON.stringify(articles, null, 2), 'utf8');
+
+    // Atomic write to avoid concurrent read corruption
+    const tempFile = `${DATA_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempFile, JSON.stringify(articles, null, 2), 'utf8');
+    fs.renameSync(tempFile, DATA_FILE);
 
     return NextResponse.json({
       success: true,
@@ -66,8 +77,4 @@ export async function POST(request) {
       error: error.message
     }, { status: 500 });
   }
-}
-
-export async function GET(request) {
-  return POST(request);
 }

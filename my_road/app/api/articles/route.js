@@ -4,51 +4,103 @@ import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
+const ALLOWED_ID_REGEX = /^[a-zA-Z0-9_\-]+\.(txt|md)$/;
+const ALLOWED_EXT_REGEX = /\.(txt|md)$/i;
+
 export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const id = searchParams.get('id');
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get('id');
 
-  const SOURCE_DIR = path.resolve(process.cwd(), '../../writing/the_world');
-  const THE_WORLD_DIR = path.resolve(process.cwd(), '../the_world/public/articles');
+    const SOURCE_DIR = path.resolve(process.cwd(), '../../writing/the_world');
+    const THE_WORLD_DIR = path.resolve(process.cwd(), '../the_world/public/articles');
 
-  if (id) {
-    const safeId = path.basename(id);
-    let targetFile = path.join(SOURCE_DIR, safeId);
-    if (!fs.existsSync(targetFile)) {
-      targetFile = path.join(THE_WORLD_DIR, safeId);
-    }
+    if (id) {
+      if (!ALLOWED_ID_REGEX.test(id)) {
+        return NextResponse.json({ error: 'Invalid article ID' }, { status: 400 });
+      }
 
-    if (fs.existsSync(targetFile)) {
+      const safeId = path.basename(id);
+      if (safeId !== id || safeId === '.' || safeId === '..') {
+        return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+      }
+
+      const checkFile = (dir) => {
+        const fullPath = path.resolve(dir, safeId);
+        if (fullPath.startsWith(dir + path.sep) && fs.existsSync(fullPath)) {
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.isFile()) return fullPath;
+          } catch (e) {}
+        }
+        return null;
+      };
+
+      const targetFile = checkFile(SOURCE_DIR) || checkFile(THE_WORLD_DIR);
+      if (!targetFile) {
+        return NextResponse.json({ error: 'Article not found' }, { status: 404 });
+      }
+
       const content = fs.readFileSync(targetFile, 'utf8');
-      return NextResponse.json({ id: safeId, content });
+      return NextResponse.json(
+        { id: safeId, content },
+        {
+          headers: {
+            'Cache-Control': 'public, max-age=60, stale-while-revalidate=300'
+          }
+        }
+      );
     }
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  }
 
-  let dirToScan = fs.existsSync(SOURCE_DIR) ? SOURCE_DIR : THE_WORLD_DIR;
-  if (fs.existsSync(dirToScan)) {
-    const files = fs.readdirSync(dirToScan);
-    const articles = [];
-    for (const file of files) {
-      if (file.endsWith('.txt') || file.endsWith('.md')) {
-        const filePath = path.join(dirToScan, file);
-        const stat = fs.statSync(filePath);
-        if (stat.isFile()) {
-          const rawContent = fs.readFileSync(filePath, 'utf8');
-          articles.push({
-            id: file,
-            name: file,
-            title: file.replace(/\.(txt|md)$/, '').replace(/_/g, ' '),
-            size: stat.size,
-            wordCount: rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0,
-            lastModified: stat.mtime.toISOString()
-          });
+    // Check pre-indexed JSON in the_world/public/articles/index.json first for speed
+    const indexedJson = path.join(THE_WORLD_DIR, 'index.json');
+    if (fs.existsSync(indexedJson)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(indexedJson, 'utf8'));
+        return NextResponse.json(
+          { articles: data },
+          {
+            headers: {
+              'Cache-Control': 'public, max-age=30, stale-while-revalidate=120'
+            }
+          }
+        );
+      } catch (e) {}
+    }
+
+    let dirToScan = fs.existsSync(SOURCE_DIR) ? SOURCE_DIR : THE_WORLD_DIR;
+    if (fs.existsSync(dirToScan)) {
+      const files = fs.readdirSync(dirToScan);
+      const articles = [];
+      for (const file of files) {
+        if (file.startsWith('.') || !ALLOWED_EXT_REGEX.test(file)) continue;
+
+        try {
+          const filePath = path.join(dirToScan, file);
+          const stat = fs.statSync(filePath);
+          if (stat.isFile()) {
+            const cleanName = file.replace(ALLOWED_EXT_REGEX, '').replace(/_/g, ' ').trim() || file;
+            articles.push({
+              id: file,
+              name: file,
+              title: cleanName,
+              size: stat.size,
+              wordCount: Math.round(stat.size / 6), // fast estimation
+              lastModified: stat.mtime.toISOString(),
+              isTxt: file.endsWith('.txt')
+            });
+          }
+        } catch (fileErr) {
+          console.warn(`[ARTICLES API] Skipped ${file}:`, fileErr.message);
         }
       }
+      articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+      return NextResponse.json({ articles });
     }
-    articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
-    return NextResponse.json({ articles });
-  }
 
-  return NextResponse.json({ articles: [] });
+    return NextResponse.json({ articles: [] });
+  } catch (err) {
+    console.error('Articles route error:', err);
+    return NextResponse.json({ error: 'Failed to process request' }, { status: 500 });
+  }
 }
