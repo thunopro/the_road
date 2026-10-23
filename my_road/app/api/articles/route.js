@@ -4,20 +4,26 @@ import path from 'path';
 
 export const dynamic = 'force-dynamic';
 
-const ALLOWED_ID_REGEX = /^[a-zA-Z0-9_\-]+\.(txt|md)$/;
-const ALLOWED_EXT_REGEX = /\.(txt|md)$/i;
+// Only allow .txt files per user requirement
+const ALLOWED_ID_REGEX = /^[a-zA-Z0-9_\-]+\.txt$/i;
+
+function getSearchDirectories() {
+  return [
+    path.resolve(process.cwd(), 'public/articles'),
+    path.resolve(process.cwd(), '../../writing/the_world'),
+    path.resolve(process.cwd(), '../the_world/public/articles'),
+  ];
+}
 
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
-
-    const SOURCE_DIR = path.resolve(process.cwd(), '../../writing/the_world');
-    const THE_WORLD_DIR = path.resolve(process.cwd(), '../the_world/public/articles');
+    const searchDirs = getSearchDirectories();
 
     if (id) {
       if (!ALLOWED_ID_REGEX.test(id)) {
-        return NextResponse.json({ error: 'Invalid article ID' }, { status: 400 });
+        return NextResponse.json({ error: 'Only .txt files are allowed' }, { status: 400 });
       }
 
       const safeId = path.basename(id);
@@ -25,77 +31,79 @@ export async function GET(request) {
         return NextResponse.json({ error: 'Access denied' }, { status: 403 });
       }
 
-      const checkFile = (dir) => {
-        const fullPath = path.resolve(dir, safeId);
-        if (fullPath.startsWith(dir + path.sep) && fs.existsSync(fullPath)) {
-          try {
-            const stat = fs.statSync(fullPath);
-            if (stat.isFile()) return fullPath;
-          } catch (e) {}
+      for (const dir of searchDirs) {
+        if (fs.existsSync(dir)) {
+          const fullPath = path.resolve(dir, safeId);
+          if (fullPath.startsWith(dir + path.sep) && fs.existsSync(fullPath)) {
+            try {
+              const stat = fs.statSync(fullPath);
+              if (stat.isFile()) {
+                const content = fs.readFileSync(fullPath, 'utf8');
+                return NextResponse.json(
+                  { id: safeId, content },
+                  {
+                    headers: {
+                      'Cache-Control': 'public, max-age=60, stale-while-revalidate=300'
+                    }
+                  }
+                );
+              }
+            } catch (e) {}
+          }
         }
-        return null;
-      };
-
-      const targetFile = checkFile(SOURCE_DIR) || checkFile(THE_WORLD_DIR);
-      if (!targetFile) {
-        return NextResponse.json({ error: 'Article not found' }, { status: 404 });
       }
 
-      const content = fs.readFileSync(targetFile, 'utf8');
-      return NextResponse.json(
-        { id: safeId, content },
-        {
-          headers: {
-            'Cache-Control': 'public, max-age=60, stale-while-revalidate=300'
-          }
-        }
-      );
+      return NextResponse.json({ error: 'Article not found' }, { status: 404 });
     }
 
-    // Check pre-indexed JSON in the_world/public/articles/index.json first for speed
-    const indexedJson = path.join(THE_WORLD_DIR, 'index.json');
-    if (fs.existsSync(indexedJson)) {
+    // List articles: Only .txt files
+    // Check index.json in public/articles if present
+    const publicIndexJson = path.resolve(process.cwd(), 'public/articles/index.json');
+    if (fs.existsSync(publicIndexJson)) {
       try {
-        const data = JSON.parse(fs.readFileSync(indexedJson, 'utf8'));
-        return NextResponse.json(
-          { articles: data },
-          {
-            headers: {
-              'Cache-Control': 'public, max-age=30, stale-while-revalidate=120'
-            }
-          }
-        );
+        const raw = JSON.parse(fs.readFileSync(publicIndexJson, 'utf8'));
+        const txtOnly = (Array.isArray(raw) ? raw : []).filter(a => a?.name?.toLowerCase().endsWith('.txt'));
+        if (txtOnly.length > 0) {
+          return NextResponse.json(
+            { articles: txtOnly },
+            { headers: { 'Cache-Control': 'public, max-age=30, stale-while-revalidate=120' } }
+          );
+        }
       } catch (e) {}
     }
 
-    let dirToScan = fs.existsSync(SOURCE_DIR) ? SOURCE_DIR : THE_WORLD_DIR;
-    if (fs.existsSync(dirToScan)) {
-      const files = fs.readdirSync(dirToScan);
-      const articles = [];
-      for (const file of files) {
-        if (file.startsWith('.') || !ALLOWED_EXT_REGEX.test(file)) continue;
+    // Scan directories for .txt files
+    for (const dir of searchDirs) {
+      if (fs.existsSync(dir)) {
+        const files = fs.readdirSync(dir);
+        const articles = [];
+        for (const file of files) {
+          if (file.startsWith('.') || !file.toLowerCase().endsWith('.txt')) continue;
+          try {
+            const filePath = path.join(dir, file);
+            const stat = fs.statSync(filePath);
+            if (stat.isFile()) {
+              const rawContent = fs.readFileSync(filePath, 'utf8');
+              const cleanName = file.replace(/\.txt$/i, '').replace(/_/g, ' ').trim() || file;
+              const wordCount = rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0;
+              articles.push({
+                id: file,
+                name: file,
+                title: cleanName,
+                size: stat.size,
+                wordCount,
+                lastModified: stat.mtime.toISOString(),
+                isTxt: true
+              });
+            }
+          } catch (fileErr) {}
+        }
 
-        try {
-          const filePath = path.join(dirToScan, file);
-          const stat = fs.statSync(filePath);
-          if (stat.isFile()) {
-            const cleanName = file.replace(ALLOWED_EXT_REGEX, '').replace(/_/g, ' ').trim() || file;
-            articles.push({
-              id: file,
-              name: file,
-              title: cleanName,
-              size: stat.size,
-              wordCount: Math.round(stat.size / 6), // fast estimation
-              lastModified: stat.mtime.toISOString(),
-              isTxt: file.endsWith('.txt')
-            });
-          }
-        } catch (fileErr) {
-          console.warn(`[ARTICLES API] Skipped ${file}:`, fileErr.message);
+        if (articles.length > 0) {
+          articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+          return NextResponse.json({ articles });
         }
       }
-      articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
-      return NextResponse.json({ articles });
     }
 
     return NextResponse.json({ articles: [] });
