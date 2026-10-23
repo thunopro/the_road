@@ -1,14 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 
-// Target directory containing raw essays
 const SOURCE_DIR = path.resolve(__dirname, '../../writing/the_world');
 const DEST_DIR = path.resolve(__dirname, 'public/articles');
 const DATA_FILE = path.resolve(__dirname, 'public/articles/index.json');
+const ALLOWED_EXT_REGEX = /\.txt$/i;
 
 function syncArticles() {
-  console.log(`[SYNC] Reading from: ${SOURCE_DIR}`);
-  console.log(`[SYNC] Outputting to: ${DEST_DIR}`);
+  const start = performance.now();
+  console.log(`[FAST-SYNC] Reading from: ${SOURCE_DIR}`);
 
   if (!fs.existsSync(DEST_DIR)) {
     fs.mkdirSync(DEST_DIR, { recursive: true });
@@ -23,37 +23,40 @@ function syncArticles() {
   const articles = [];
 
   for (const file of files) {
-    // Only accept text files or markdown files if needed, primarily txt as user specified
-    if (file.endsWith('.txt') || file.endsWith('.md')) {
-      const filePath = path.join(SOURCE_DIR, file);
-      const stat = fs.statSync(filePath);
-      if (stat.isFile()) {
-        const rawContent = fs.readFileSync(filePath, 'utf8');
-        const destPath = path.join(DEST_DIR, file);
-        fs.writeFileSync(destPath, rawContent, 'utf8');
+    if (file.startsWith('.') || !ALLOWED_EXT_REGEX.test(file)) continue;
 
-        // Derive title
-        const cleanName = file.replace(/\.(txt|md)$/, '').replace(/_/g, ' ');
-        const wordCount = rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0;
+    const filePath = path.join(SOURCE_DIR, file);
+    try {
+      const lstat = fs.lstatSync(filePath);
+      if (!lstat.isFile() || lstat.isSymbolicLink()) continue;
 
-        articles.push({
-          id: file,
-          name: file,
-          title: cleanName,
-          size: stat.size,
-          wordCount,
-          lastModified: stat.mtime.toISOString(),
-          isTxt: file.endsWith('.txt')
-        });
-      }
-    }
+      const rawContent = fs.readFileSync(filePath, 'utf8');
+      const destPath = path.join(DEST_DIR, file);
+      fs.writeFileSync(destPath, rawContent, 'utf8');
+
+      const cleanName = file.replace(ALLOWED_EXT_REGEX, '').replace(/_/g, ' ').trim() || file;
+      const wordCount = rawContent.trim() ? rawContent.trim().split(/\s+/).length : 0;
+
+      articles.push({
+        id: file,
+        name: file,
+        title: cleanName,
+        size: lstat.size,
+        wordCount,
+        lastModified: lstat.mtime.toISOString(),
+        isTxt: true
+      });
+    } catch (e) {}
   }
 
-  // Sort: newest first or alphabetical
   articles.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
 
-  fs.writeFileSync(DATA_FILE, JSON.stringify(articles, null, 2), 'utf8');
-  console.log(`[SYNC SUCCESS] Synced ${articles.length} article(s).`);
+  const tempFile = `${DATA_FILE}.tmp.${Date.now()}`;
+  fs.writeFileSync(tempFile, JSON.stringify(articles, null, 2), 'utf8');
+  fs.renameSync(tempFile, DATA_FILE);
+
+  const duration = (performance.now() - start).toFixed(2);
+  console.log(`[FAST-SYNC SUCCESS] Synced ${articles.length} txt article(s) in ${duration}ms.`);
   return articles;
 }
 

@@ -227,7 +227,7 @@ export default function MyRoadPage() {
   }, []);
 
   const solvedCount = ucupData?.totalSolved ?? 0;
-  const targetGoal = ucupData?.target || 200;
+  const targetGoal = ucupData?.target || 1000;
 
   const filteredArticles = useMemo(() => {
     const q = worldSearch.toLowerCase();
